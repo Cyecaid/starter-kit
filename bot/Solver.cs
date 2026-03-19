@@ -260,9 +260,7 @@ public class Solver
         var myIngredientsWithoutDish = myIngredients.Where(i => i != "DISH").ToHashSet();
         
         if (myIngredients.Contains("DISH") && !myIngredientsWithoutDish.IsSubsetOf(ingredients))
-        {
             return -100000;
-        }
         
         foreach (var req in ingredients) 
             estimatedTurns += EstimateIngredientCost(req, state, ingredients);
@@ -270,7 +268,12 @@ public class Solver
         if (estimatedTurns > state.TurnsRemaining + 2) 
             return -10000;
         
-        var finalScore = (double)customer.Award / Math.Max(1, estimatedTurns); 
+        double finalScore;
+        
+        if (state.TurnsRemaining <= 70)
+            finalScore = 1000.0 - estimatedTurns + customer.Award / 10000.0;
+        else
+            finalScore = (double)customer.Award / Max(1, estimatedTurns);
         
         if (customer.Item == currentOrderId) finalScore += 10000; 
         
