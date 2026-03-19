@@ -12,7 +12,7 @@ public class StateInit
 
     public V StrawberriesPos = V.None;
     public V ChoppingBoardPos = V.None;
-    public V CroissantPos = V.None;
+    public V DoughPos = V.None;
     public V OvenPos = V.None;
 }
 

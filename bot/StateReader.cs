@@ -83,7 +83,7 @@ public static class StateReader
                         init.ChoppingBoardPos = new V(x, y);
                         break;
                     case 'H':
-                        init.CroissantPos = new V(x, y);
+                        init.DoughPos = new V(x, y);
                         break;
                     case 'O':
                         init.OvenPos = new V(x, y);
