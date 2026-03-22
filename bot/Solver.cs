@@ -23,18 +23,56 @@ public class Solver
             .First();
         currentOrderId = targetOrder;
         targetIngredients = targetOrder.Split('-').ToHashSet();
+        if (hasDish && state.PartnerItem.StartsWith("DISH"))
+        {
+            var pItems = state.PartnerItem.Split('-').Where(i => i != "DISH").ToHashSet();
+            if (myIngredientsWithoutDish.IsSubsetOf(targetIngredients) && pItems.IsSubsetOf(targetIngredients))
+            {
+                var partnerDone = targetIngredients.IsSubsetOf(pItems);
+                var myLen = myIngredientsWithoutDish.Count;
+                var pLen = pItems.Count;
+                var iShouldYield = partnerDone || myLen < pLen || (myLen == pLen && MDist(state.PlayerPos, init.DishwasherPos) < MDist(state.PartnerPos, init.DishwasherPos));
+                
+                if (iShouldYield) {
+                    var canBeReused = false;
+                    foreach (var c in state.Customers) {
+                        if (c.Item == currentOrderId) continue; 
+                        var req = c.Item.Split('-').ToHashSet();
+                        if (myIngredientsWithoutDish.IsSubsetOf(req)) {
+                            canBeReused = true; 
+                            break;
+                        }
+                    }
+                    return canBeReused ? new Use(FindEmptyTable(init, state)) : new Use(init.DishwasherPos);
+                }
+            }
+        }
         var needsTart = targetIngredients.Contains("TART");
         var needsCroissant = targetIngredients.Contains("CROISSANT");
         var needsStrawberries = targetIngredients.Contains("CHOPPED_STRAWBERRIES");
-        var tartReady = GetTableWithItem("TART", state) != null || state.OvenContents == "TART" || IsItemInAnyValidDish("TART", state, targetIngredients) || IsItemWithPlayerOrPartner("TART", state, targetIngredients);
+        
+        var tartReady = GetTableWithItem("TART", state) != null || state.OvenContents == "TART" || 
+            (!hasDish && IsItemInAnyValidDish("TART", state, targetIngredients)) || 
+            (!hasDish && IsItemWithPartner("TART", state, targetIngredients)) || state.PartnerItem == "TART";
         var tartCooking = state.OvenContents == "RAW_TART";
         var tartInProgressByPartner = state.PartnerItem is "RAW_TART" or "CHOPPED_DOUGH";
-        var croissantReady = GetTableWithItem("CROISSANT", state) != null || state.OvenContents == "CROISSANT" || IsItemInAnyValidDish("CROISSANT", state, targetIngredients) || IsItemWithPlayerOrPartner("CROISSANT", state, targetIngredients);
+        
+        var croissantReady = GetTableWithItem("CROISSANT", state) != null || state.OvenContents == "CROISSANT" || 
+            (!hasDish && IsItemInAnyValidDish("CROISSANT", state, targetIngredients)) || 
+            (!hasDish && IsItemWithPartner("CROISSANT", state, targetIngredients)) || state.PartnerItem == "CROISSANT";
         var croissantCooking = state.OvenContents == "DOUGH";
         var croissantInProgressByPartner = state.PartnerItem == "DOUGH" && !needsTart;
+        
         var boardItem = state.TablesWithItems.GetValueOrDefault(init.ChoppingBoardPos, "NONE");
-        var choppedReady = GetTableWithItem("CHOPPED_STRAWBERRIES", state) != null || boardItem == "CHOPPED_STRAWBERRIES" || IsItemInAnyValidDish("CHOPPED_STRAWBERRIES", state, targetIngredients) || IsItemWithPlayerOrPartner("CHOPPED_STRAWBERRIES", state, targetIngredients);
+        var choppedReady = GetTableWithItem("CHOPPED_STRAWBERRIES", state) != null || boardItem == "CHOPPED_STRAWBERRIES" || 
+            (!hasDish && IsItemInAnyValidDish("CHOPPED_STRAWBERRIES", state, targetIngredients)) || 
+            (!hasDish && IsItemWithPartner("CHOPPED_STRAWBERRIES", state, targetIngredients)) || state.PartnerItem == "CHOPPED_STRAWBERRIES";
         var choppedInProgressByPartner = state.PartnerItem == "STRAWBERRIES";
+        
+        var iAmMakingTart = state.PlayerItem is "RAW_TART" or "CHOPPED_DOUGH" || (state.PlayerItem == "DOUGH" && needsTart);
+        var iAmMakingCroissant = state.PlayerItem == "DOUGH" && !needsTart;
+        var iAmChopping = state.PlayerItem == "STRAWBERRIES";
+
         var isUseful = false;
         if (state.PlayerItem == "NONE") {
             isUseful = true;
@@ -57,6 +95,9 @@ public class Solver
         if (!isUseful) {
             return new Use(FindEmptyTable(init, state));
         }
+        if (!isUseful) {
+            return new Use(FindEmptyTable(init, state));
+        }
         if (state.PlayerItem == "NONE" && (state.OvenContents == "CROISSANT" || state.OvenContents == "TART"))
         {
             var myDist = MDist(state.PlayerPos, init.OvenPos);
@@ -66,12 +107,12 @@ public class Solver
         }
         if (targetIngredients.IsSubsetOf(myIngredients))
             return new Use(init.WindowPos);
-        if (needsTart && !tartReady && !tartCooking && !tartInProgressByPartner && !myIngredients.Contains("TART"))
+        if (needsTart && !tartReady && !tartCooking && (!tartInProgressByPartner || iAmMakingTart) && !myIngredients.Contains("TART"))
         {
             if (hasDish) return new Use(FindEmptyTable(init, state)); 
             if (state.PlayerItem == "RAW_TART") {
                 if (state.OvenContents == "NONE") return new Use(init.OvenPos);
-                return new Use(FindEmptyTable(init, state));
+                return new Use(FindEmptyTable(init, state, init.OvenPos)); 
             }
             var rawTartTable = GetTableWithItem("RAW_TART", state);
             if (rawTartTable != null && state.PlayerItem == "NONE" && state.OvenContents == "NONE") {
@@ -92,12 +133,12 @@ public class Solver
                 };
             }
         }
-        if (needsCroissant && !croissantReady && !croissantCooking && !croissantInProgressByPartner && !myIngredients.Contains("CROISSANT"))
+        if (needsCroissant && !croissantReady && !croissantCooking && (!croissantInProgressByPartner || iAmMakingCroissant) && !myIngredients.Contains("CROISSANT"))
         {
             if (hasDish) return new Use(FindEmptyTable(init, state));
             if (state.PlayerItem == "DOUGH") {
                 if (state.OvenContents == "NONE") return new Use(init.OvenPos);
-                return new Use(FindEmptyTable(init, state));
+                return new Use(FindEmptyTable(init, state, init.OvenPos)); 
             }
             var doughTable = GetTableWithItem("DOUGH", state);
             if (doughTable != null && state.PlayerItem == "NONE" && state.OvenContents == "NONE") {
@@ -108,7 +149,7 @@ public class Solver
                 return new Use(init.CroissantPos);
             }
         }
-        if (needsStrawberries && !choppedReady && !choppedInProgressByPartner && !myIngredients.Contains("CHOPPED_STRAWBERRIES"))
+        if (needsStrawberries && !choppedReady && (!choppedInProgressByPartner || iAmChopping) && !myIngredients.Contains("CHOPPED_STRAWBERRIES"))
         {
             if (hasDish) return new Use(FindEmptyTable(init, state));
             if (state.PlayerItem == "STRAWBERRIES") {
@@ -127,10 +168,12 @@ public class Solver
         if (!hasDish)
         {
             var holdingValidIngredient = state.PlayerItem is "BLUEBERRIES" or "ICE_CREAM" or "CHOPPED_STRAWBERRIES" or "CROISSANT" or "TART";
+            
+            V bestDishPos = null;
+            var maxDishItems = -1;
+            
             if (state.PlayerItem == "NONE" || holdingValidIngredient) 
             {
-                V bestDishPos = null;
-                var maxDishItems = -1;
                 foreach (var kvp in state.TablesWithItems)
                 {
                     if (!kvp.Value.StartsWith("DISH")) continue;
@@ -147,21 +190,41 @@ public class Solver
                 }
                 if (bestDishPos != null) return new Use(bestDishPos);
             }
-            if (state.PlayerItem == "NONE")
+            
+            var partnerAssembling = state.PartnerItem.StartsWith("DISH") && 
+                state.PartnerItem.Split('-').Where(i => i != "DISH").All(targetIngredients.Contains);
+
+            if (state.PlayerItem == "NONE" && partnerAssembling)
             {
-                foreach (var kvp in state.TablesWithItems)
-                    if (kvp.Value == "DISH") return new Use(kvp.Key);
             }
-            return state.PlayerItem == "NONE" ? new Use(init.DishwasherPos) : new Use(FindEmptyTable(init, state));
+            else
+            {
+                if (state.PlayerItem == "NONE")
+                {
+                    foreach (var kvp in state.TablesWithItems)
+                        if (kvp.Value == "DISH") return new Use(kvp.Key);
+                }
+                return state.PlayerItem == "NONE" ? new Use(init.DishwasherPos) : new Use(FindEmptyTable(init, state));
+            }
         }
         var missingIngredients = targetIngredients.Except(myIngredientsWithoutDish).ToList();
         var reallyMissingIngredients = new List<string>();
+        
+        var partnerAssemblingThis = state.PartnerItem.StartsWith("DISH") && 
+                                    state.PartnerItem.Split('-').Where(i => i != "DISH").ToHashSet().IsSubsetOf(targetIngredients);
+
         foreach (var needed in missingIngredients)
         {
             if (needed == "DISH") continue;
-            if (IsItemWithPartner(needed, state, targetIngredients)) continue;
+            if (hasDish && state.PartnerItem == needed) continue;
+
+            if (!hasDish && IsItemWithPartner(needed, state, targetIngredients)) continue;
+            
+            if (partnerAssemblingThis && GetTableWithItem(needed, state) != null) continue;
+            
             reallyMissingIngredients.Add(needed);
         }
+        
         if (reallyMissingIngredients.Count == 0 && missingIngredients.Count > 0) {
             if (MDist(state.PlayerPos, init.WindowPos) > 2) return new Move(init.WindowPos);
             return new Wait();
@@ -190,9 +253,14 @@ public class Solver
                         targetPos = sPos;
                         score = MDist(state.PlayerPos, targetPos) * 10 - 50;
                     }
-                    else if (boardItem == "CHOPPED_STRAWBERRIES") {
+                    else if (boardItem == "CHOPPED_STRAWBERRIES" || boardItem == "STRAWBERRIES" || state.PlayerItem == "STRAWBERRIES") {
                         targetPos = init.ChoppingBoardPos;
                         score = MDist(state.PlayerPos, targetPos) * 10 - 50;
+                    }
+                    else {
+                        var rawS = GetTableWithItem("STRAWBERRIES", state);
+                        targetPos = rawS ?? init.StrawberriesPos;
+                        score = MDist(state.PlayerPos, targetPos) * 10;
                     }
                     break;
                 case "CROISSANT":
@@ -201,7 +269,7 @@ public class Solver
                         targetPos = cPos;
                         score = MDist(state.PlayerPos, targetPos) * 10 - 50;
                     }
-                    else if (state.OvenContents == "CROISSANT") {
+                    else if (state.OvenContents == "CROISSANT" && (state.PlayerItem == "NONE" || state.PlayerItem.StartsWith("DISH"))) { 
                         targetPos = init.OvenPos;
                         score = MDist(state.PlayerPos, targetPos) * 10 - 1000;
                     }
@@ -216,7 +284,7 @@ public class Solver
                         targetPos = tPos;
                         score = MDist(state.PlayerPos, targetPos) * 10 - 50;
                     }
-                    else if (state.OvenContents == "TART") {
+                    else if (state.OvenContents == "TART" && (state.PlayerItem == "NONE" || state.PlayerItem.StartsWith("DISH"))) { 
                         targetPos = init.OvenPos;
                         score = MDist(state.PlayerPos, targetPos) * 10 - 1000;
                     }
@@ -253,13 +321,40 @@ public class Solver
         var myIngredientsWithoutDish = myIngredients.Where(i => i != "DISH").ToHashSet();
         if (myIngredients.Contains("DISH") && !myIngredientsWithoutDish.IsSubsetOf(ingredients))
             return -100000;
+        
+        if (state.PlayerItem == "NONE" && state.PartnerItem.StartsWith("DISH")) 
+        {
+            var pItems = state.PartnerItem.Split('-').Where(i => i != "DISH").ToHashSet();
+            if (pItems.IsSubsetOf(ingredients)) 
+            {
+                var missing = ingredients.Except(pItems).ToList();
+                var allMissingAvailable = true;
+                
+                foreach (var m in missing)
+                {
+                    var isAvailable = GetTableWithItem(m, state) != null;
+                    
+                    if (m == "CROISSANT" && (state.OvenContents == "CROISSANT" || state.OvenContents == "DOUGH")) isAvailable = true;
+                    if (m == "TART" && (state.OvenContents == "TART" || state.OvenContents == "RAW_TART")) isAvailable = true;
+                    
+                    if (!isAvailable) {
+                        allMissingAvailable = false;
+                        break;
+                    }
+                }
+
+                if (allMissingAvailable) return -50000; 
+            }
+        }
+
         foreach (var req in ingredients) 
             estimatedTurns += EstimateIngredientCost(req, state, ingredients);
+            
         if (estimatedTurns > state.TurnsRemaining + 2) 
             return -10000;
         
         double finalScore;
-        if (state.TurnsRemaining <= 20)
+        if (state.TurnsRemaining <= 40)
             finalScore = 1000.0 - estimatedTurns + customer.Award / 10000.0;
         else
             finalScore = (double)customer.Award / Max(1, estimatedTurns);
@@ -267,6 +362,7 @@ public class Solver
         if (customer.Item == currentOrderId) finalScore += 10000; 
         return finalScore;
     }
+    
     private int EstimateIngredientCost(string req, State state, HashSet<string> orderIngredients)
     {
         if (IsItemWithPlayerOrPartner(req, state, orderIngredients)) return 0;
@@ -334,7 +430,7 @@ public class Solver
         }
         return false;
     }
-    private static V FindEmptyTable(StateInit init, State state)
+    private static V FindEmptyTable(StateInit init, State state, V preferredTarget = null)
     {
         var bestTable = init.DishwasherPos;
         var minScore = int.MaxValue;
@@ -344,9 +440,15 @@ public class Solver
             var pos = new V(x, y);
             if (init.Map[x, y] == '#' && !state.TablesWithItems.ContainsKey(pos))
             {
-                var distToMe = MDist(state.PlayerPos, pos);
-                var distToPartner = MDist(state.PartnerPos, pos);
-                var score = distToMe * 10 - distToPartner; 
+                int score;
+                if (preferredTarget != null) {
+                    score = MDist(pos, preferredTarget) * 10 + MDist(state.PlayerPos, pos);
+                } else {
+                    var distToMe = MDist(state.PlayerPos, pos);
+                    var distToPartner = MDist(state.PartnerPos, pos);
+                    score = distToMe * 10 - distToPartner; 
+                }
+                
                 if (score < minScore)
                 {
                     minScore = score;
