@@ -28,19 +28,19 @@ public class Solver
             var pItems = state.PartnerItem.Split('-').Where(i => i != "DISH").ToHashSet();
             if (myIngredientsWithoutDish.IsSubsetOf(targetIngredients) && pItems.IsSubsetOf(targetIngredients))
             {
-                var partnerDone = targetIngredients.IsSubsetOf(pItems);
+                var partnerDone = targetIngredients.Where(i => i != "DISH").All(pItems.Contains);
                 var myLen = myIngredientsWithoutDish.Count;
                 var pLen = pItems.Count;
+                
                 var iShouldYield = partnerDone || myLen < pLen || (myLen == pLen && MDist(state.PlayerPos, init.DishwasherPos) < MDist(state.PartnerPos, init.DishwasherPos));
                 
                 if (iShouldYield) {
                     var canBeReused = false;
                     foreach (var c in state.Customers) {
                         if (c.Item == currentOrderId) continue; 
-                        var req = c.Item.Split('-').ToHashSet();
+                        var req = c.Item.Split('-').Where(i => i != "DISH").ToHashSet();
                         if (myIngredientsWithoutDish.IsSubsetOf(req)) {
-                            canBeReused = true; 
-                            break;
+                            canBeReused = true; break;
                         }
                     }
                     return canBeReused ? new Use(FindEmptyTable(init, state)) : new Use(init.DishwasherPos);
@@ -327,15 +327,15 @@ public class Solver
             var pItems = state.PartnerItem.Split('-').Where(i => i != "DISH").ToHashSet();
             if (pItems.IsSubsetOf(ingredients)) 
             {
-                var missing = ingredients.Except(pItems).ToList();
+                var missing = ingredients.Where(i => i != "DISH").Except(pItems).ToList();
                 var allMissingAvailable = true;
                 
                 foreach (var m in missing)
                 {
                     var isAvailable = GetTableWithItem(m, state) != null;
                     
-                    if (m == "CROISSANT" && (state.OvenContents == "CROISSANT" || state.OvenContents == "DOUGH")) isAvailable = true;
-                    if (m == "TART" && (state.OvenContents == "TART" || state.OvenContents == "RAW_TART")) isAvailable = true;
+                    if (m == "CROISSANT" && state.OvenContents is "CROISSANT" or "DOUGH") isAvailable = true;
+                    if (m == "TART" && state.OvenContents is "TART" or "RAW_TART") isAvailable = true;
                     
                     if (!isAvailable) {
                         allMissingAvailable = false;
@@ -343,7 +343,8 @@ public class Solver
                     }
                 }
 
-                if (allMissingAvailable) return -50000; 
+                if (allMissingAvailable) return 
+                    -50000; 
             }
         }
 
