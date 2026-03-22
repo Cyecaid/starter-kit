@@ -5,24 +5,36 @@ public class Solver
     private StateInit init;
     private HashSet<string> targetIngredients;
     private string currentOrderId = null;
+    
+    // Anti-loop переменные
+    private V lastActionPos = null;
+    private int loopCounter = 0;
+
     public BotCommand GetCommand(State state, Countdown countdown)
     {
         if (state.Customers.Count == 0)
             return new Wait();
+            
         init = state.Init;
-        var myIngredients = state.PlayerItem == "NONE" 
-            ? new HashSet<string>() 
+        var myIngredients = state.PlayerItem == "NONE"
+            ? new HashSet<string>()
             : state.PlayerItem.Split('-').ToHashSet();
+            
         var myIngredientsWithoutDish = myIngredients.Where(i => i != "DISH").ToHashSet();
         var hasDish = myIngredients.Contains("DISH");
+        
         if (currentOrderId != null && state.Customers.All(c => c.Item != currentOrderId)) {
             currentOrderId = null;
         }
+        
         var (targetOrder, _) = state.Customers
             .OrderByDescending(c => EvaluateOrder(c, state, myIngredients))
             .First();
+            
         currentOrderId = targetOrder;
         targetIngredients = targetOrder.Split('-').ToHashSet();
+
+        // 1. ПРОВЕРКА НА УСТУПКУ (YIELD) И ИЗБЕЖАНИЕ DEADLOCK'ОВ
         if (hasDish && state.PartnerItem.StartsWith("DISH"))
         {
             var pItems = state.PartnerItem.Split('-').Where(i => i != "DISH").ToHashSet();
@@ -32,8 +44,17 @@ public class Solver
                 var myLen = myIngredientsWithoutDish.Count;
                 var pLen = pItems.Count;
                 
-                var iShouldYield = partnerDone || myLen < pLen || (myLen == pLen && MDist(state.PlayerPos, init.DishwasherPos) < MDist(state.PartnerPos, init.DishwasherPos));
+                var myDist = MDist(state.PlayerPos, init.WindowPos);
+                var pDist = MDist(state.PartnerPos, init.WindowPos);
+
+                // Жесткий Tie-Breaker: если все равно, уступает тот, у кого X больше (чтобы не перекидывали бесконечно)
+                var iShouldYield = partnerDone || myLen < pLen || 
+                                  (myLen == pLen && (myDist > pDist || (myDist == pDist && state.PlayerPos.X > state.PartnerPos.X)));
                 
+                // CLUTCH MODE: Если конец игры и партнер не успеет донести, мы НЕ уступаем.
+                if (state.TurnsRemaining < pDist + 4 && !partnerDone) 
+                    iShouldYield = false;
+
                 if (iShouldYield) {
                     var canBeReused = false;
                     foreach (var c in state.Customers) {
@@ -43,10 +64,11 @@ public class Solver
                             canBeReused = true; break;
                         }
                     }
-                    return canBeReused ? new Use(FindEmptyTable(init, state)) : new Use(init.DishwasherPos);
+                    return CreateAction(new Use(canBeReused ? FindEmptyTable(init, state) : init.DishwasherPos));
                 }
             }
         }
+
         var needsTart = targetIngredients.Contains("TART");
         var needsCroissant = targetIngredients.Contains("CROISSANT");
         var needsStrawberries = targetIngredients.Contains("CHOPPED_STRAWBERRIES");
@@ -73,6 +95,7 @@ public class Solver
         var iAmMakingCroissant = state.PlayerItem == "DOUGH" && !needsTart;
         var iAmChopping = state.PlayerItem == "STRAWBERRIES";
 
+        // 2. СБРОС МУСОРА
         var isUseful = false;
         if (state.PlayerItem == "NONE") {
             isUseful = true;
@@ -92,83 +115,92 @@ public class Solver
                 isUseful = true;
             }
         }
+
         if (!isUseful) {
-            return new Use(FindEmptyTable(init, state));
+            // Если мы уже пытались кинуть сюда мусор, но зациклились - бросаем в посудомойку или на другой стол
+            if (loopCounter > 2) return CreateAction(new Use(init.DishwasherPos));
+            return CreateAction(new Use(FindEmptyTable(init, state)));
         }
-        if (!isUseful) {
-            return new Use(FindEmptyTable(init, state));
-        }
+
+        // 3. ПЕЧЬ - ЕСЛИ ПУСТЫЕ РУКИ
         if (state.PlayerItem == "NONE" && (state.OvenContents == "CROISSANT" || state.OvenContents == "TART"))
         {
             var myDist = MDist(state.PlayerPos, init.OvenPos);
             var partnerDist = MDist(state.PartnerPos, init.OvenPos);
             var isPartnerCloser = state.PartnerItem == "NONE" && partnerDist < myDist;
-            if (!isPartnerCloser) return new Use(init.OvenPos);
+            if (!isPartnerCloser) return CreateAction(new Use(init.OvenPos));
         }
+
+        // 4. ГОТОВОЕ БЛЮДО
         if (targetIngredients.IsSubsetOf(myIngredients))
-            return new Use(init.WindowPos);
+            return CreateAction(new Use(init.WindowPos));
+
+        // 5. ЛОГИКА ПРИГОТОВЛЕНИЯ КОМПОНЕНТОВ
         if (needsTart && !tartReady && !tartCooking && (!tartInProgressByPartner || iAmMakingTart) && !myIngredients.Contains("TART"))
         {
-            if (hasDish) return new Use(FindEmptyTable(init, state)); 
+            if (hasDish) return CreateAction(new Use(FindEmptyTable(init, state))); 
             if (state.PlayerItem == "RAW_TART") {
-                if (state.OvenContents == "NONE") return new Use(init.OvenPos);
-                return new Use(FindEmptyTable(init, state, init.OvenPos)); 
+                if (state.OvenContents == "NONE") return CreateAction(new Use(init.OvenPos));
+                return CreateAction(new Use(FindEmptyTable(init, state, init.OvenPos))); 
             }
             var rawTartTable = GetTableWithItem("RAW_TART", state);
             if (rawTartTable != null && state.PlayerItem == "NONE" && state.OvenContents == "NONE") {
-                return new Use(rawTartTable);
+                return CreateAction(new Use(rawTartTable));
             }
             if (rawTartTable == null) {
-                if (state.PlayerItem == "CHOPPED_DOUGH") return new Use(init.BlueberriesPos); 
+                if (state.PlayerItem == "CHOPPED_DOUGH") return CreateAction(new Use(init.BlueberriesPos)); 
                 var choppedDoughTable = GetTableWithItem("CHOPPED_DOUGH", state);
-                if (choppedDoughTable != null && state.PlayerItem == "NONE") return new Use(choppedDoughTable);
+                if (choppedDoughTable != null && state.PlayerItem == "NONE") return CreateAction(new Use(choppedDoughTable));
                 if (boardItem is "CHOPPED_DOUGH" or "DOUGH")
-                    return state.PlayerItem == "NONE" ? new Use(init.ChoppingBoardPos) : new Use(FindEmptyTable(init, state));
+                    return CreateAction(state.PlayerItem == "NONE" ? new Use(init.ChoppingBoardPos) : new Use(FindEmptyTable(init, state)));
                 if (boardItem != "NONE")
-                    return state.PlayerItem == "NONE" ? new Use(init.ChoppingBoardPos) : new Use(FindEmptyTable(init, state));
-                return state.PlayerItem switch {
+                    return CreateAction(state.PlayerItem == "NONE" ? new Use(init.ChoppingBoardPos) : new Use(FindEmptyTable(init, state)));
+                return CreateAction(state.PlayerItem switch {
                     "DOUGH" => new Use(init.ChoppingBoardPos),
                     "NONE" => new Use(init.CroissantPos), 
                     _ => new Use(FindEmptyTable(init, state))
-                };
+                });
             }
         }
+        
         if (needsCroissant && !croissantReady && !croissantCooking && (!croissantInProgressByPartner || iAmMakingCroissant) && !myIngredients.Contains("CROISSANT"))
         {
-            if (hasDish) return new Use(FindEmptyTable(init, state));
+            if (hasDish) return CreateAction(new Use(FindEmptyTable(init, state)));
             if (state.PlayerItem == "DOUGH") {
-                if (state.OvenContents == "NONE") return new Use(init.OvenPos);
-                return new Use(FindEmptyTable(init, state, init.OvenPos)); 
+                if (state.OvenContents == "NONE") return CreateAction(new Use(init.OvenPos));
+                return CreateAction(new Use(FindEmptyTable(init, state, init.OvenPos))); 
             }
             var doughTable = GetTableWithItem("DOUGH", state);
             if (doughTable != null && state.PlayerItem == "NONE" && state.OvenContents == "NONE") {
-                return new Use(doughTable);
+                return CreateAction(new Use(doughTable));
             }
             if (state.OvenContents == "NONE") {
-                if (state.PlayerItem != "NONE") return new Use(FindEmptyTable(init, state));
-                return new Use(init.CroissantPos);
+                if (state.PlayerItem != "NONE") return CreateAction(new Use(FindEmptyTable(init, state)));
+                return CreateAction(new Use(init.CroissantPos));
             }
         }
+        
         if (needsStrawberries && !choppedReady && (!choppedInProgressByPartner || iAmChopping) && !myIngredients.Contains("CHOPPED_STRAWBERRIES"))
         {
-            if (hasDish) return new Use(FindEmptyTable(init, state));
+            if (hasDish) return CreateAction(new Use(FindEmptyTable(init, state)));
             if (state.PlayerItem == "STRAWBERRIES") {
-                if (boardItem == "NONE") return new Use(init.ChoppingBoardPos);
-                return new Use(FindEmptyTable(init, state));
+                if (boardItem == "NONE") return CreateAction(new Use(init.ChoppingBoardPos));
+                return CreateAction(new Use(FindEmptyTable(init, state)));
             }
             if (boardItem is "STRAWBERRIES" or "CHOPPED_STRAWBERRIES")
-                return state.PlayerItem == "NONE" ? new Use(init.ChoppingBoardPos) : new Use(FindEmptyTable(init, state));
+                return CreateAction(state.PlayerItem == "NONE" ? new Use(init.ChoppingBoardPos) : new Use(FindEmptyTable(init, state)));
             if (boardItem != "NONE")
-                return state.PlayerItem == "NONE" ? new Use(init.ChoppingBoardPos) : new Use(FindEmptyTable(init, state));
+                return CreateAction(state.PlayerItem == "NONE" ? new Use(init.ChoppingBoardPos) : new Use(FindEmptyTable(init, state)));
             var strawbTabl = GetTableWithItem("STRAWBERRIES", state);
-            if (strawbTabl != null && state.PlayerItem == "NONE") return new Use(strawbTabl);
-            if (state.PlayerItem != "NONE") return new Use(FindEmptyTable(init, state));
-            return new Use(init.StrawberriesPos);
+            if (strawbTabl != null && state.PlayerItem == "NONE") return CreateAction(new Use(strawbTabl));
+            if (state.PlayerItem != "NONE") return CreateAction(new Use(FindEmptyTable(init, state)));
+            return CreateAction(new Use(init.StrawberriesPos));
         }
+
+        // 6. ПОИСК ТАРЕЛКИ
         if (!hasDish)
         {
             var holdingValidIngredient = state.PlayerItem is "BLUEBERRIES" or "ICE_CREAM" or "CHOPPED_STRAWBERRIES" or "CROISSANT" or "TART";
-            
             V bestDishPos = null;
             var maxDishItems = -1;
             
@@ -179,6 +211,7 @@ public class Solver
                     if (!kvp.Value.StartsWith("DISH")) continue;
                     var dishItems = kvp.Value.Split('-').ToHashSet();
                     var dishItemsWithoutDish = dishItems.Where(i => i != "DISH").ToHashSet();
+                    
                     if (state.PlayerItem != "NONE" && dishItems.Contains(state.PlayerItem)) continue;
                     if (dishItemsWithoutDish.IsSubsetOf(targetIngredients))
                     {
@@ -188,25 +221,31 @@ public class Solver
                         }
                     }
                 }
-                if (bestDishPos != null) return new Use(bestDishPos);
+                if (bestDishPos != null) return CreateAction(new Use(bestDishPos));
             }
             
             var partnerAssembling = state.PartnerItem.StartsWith("DISH") && 
                 state.PartnerItem.Split('-').Where(i => i != "DISH").All(targetIngredients.Contains);
+            
+            // Если осталось мало времени, а партнер далеко от окна — забираем инициативу
+            if (partnerAssembling && state.TurnsRemaining < 12 && MDist(state.PartnerPos, init.WindowPos) > 4)
+                partnerAssembling = false;
 
-            if (state.PlayerItem == "NONE" && partnerAssembling)
-            {
+            if (state.PlayerItem == "NONE" && partnerAssembling) {
+                // Если партер уже собирает тарелку, помогаем ему принести ингредиенты (пропускаем блок)
             }
             else
             {
                 if (state.PlayerItem == "NONE")
                 {
                     foreach (var kvp in state.TablesWithItems)
-                        if (kvp.Value == "DISH") return new Use(kvp.Key);
+                        if (kvp.Value == "DISH") return CreateAction(new Use(kvp.Key));
                 }
-                return state.PlayerItem == "NONE" ? new Use(init.DishwasherPos) : new Use(FindEmptyTable(init, state));
+                return CreateAction(state.PlayerItem == "NONE" ? new Use(init.DishwasherPos) : new Use(FindEmptyTable(init, state)));
             }
         }
+
+        // 7. СБОР НЕДОСТАЮЩИХ ИНГРЕДИЕНТОВ
         var missingIngredients = targetIngredients.Except(myIngredientsWithoutDish).ToList();
         var reallyMissingIngredients = new List<string>();
         
@@ -217,18 +256,20 @@ public class Solver
         {
             if (needed == "DISH") continue;
             if (hasDish && state.PartnerItem == needed) continue;
-
             if (!hasDish && IsItemWithPartner(needed, state, targetIngredients)) continue;
-            
             if (partnerAssemblingThis && GetTableWithItem(needed, state) != null) continue;
-            
             reallyMissingIngredients.Add(needed);
         }
         
         if (reallyMissingIngredients.Count == 0 && missingIngredients.Count > 0) {
-            if (MDist(state.PlayerPos, init.WindowPos) > 2) return new Move(init.WindowPos);
-            return new Wait();
+            // Если мы ждем партнера, не мешаем ему у печи/окна
+            var dodgePos = DodgePartner(init, state);
+            if (dodgePos != null) return CreateAction(new Move(dodgePos));
+            
+            if (MDist(state.PlayerPos, init.WindowPos) > 2) return CreateAction(new Move(init.WindowPos));
+            return CreateAction(new Wait());
         }
+        
         BotCommand bestAction = new Wait();
         var bestScore = double.MaxValue;
         foreach (var needed in reallyMissingIngredients)
@@ -295,10 +336,14 @@ public class Solver
                     break;
             }
             
+            // ДИНАМИЧЕСКИЙ РАДИУС ОТХОДА ОТ ПЕЧИ (DYNAMIC MULTITASKING)
             var ovenBusy = state.OvenContents != "NONE";
-            if (ovenBusy && targetPos != null && targetPos != init.OvenPos)
-                if (MDist(targetPos, init.OvenPos) > 4) 
+            if (ovenBusy && targetPos != null && targetPos != init.OvenPos) {
+                // Если печь скоро доготовит (1 ход = 10 timer), далеко не отходим.
+                int safeDist = state.OvenTimer > 4 ? 8 : 4; 
+                if (MDist(targetPos, init.OvenPos) > safeDist) 
                     score += 5000;
+            }
             
             if (targetPos != null && score < bestScore)
             {
@@ -310,10 +355,42 @@ public class Solver
         }
         
         if (bestAction is Wait && state.OvenContents != "NONE" && MDist(state.PlayerPos, init.OvenPos) > 2)
-            return new Move(init.OvenPos);
+            return CreateAction(new Move(init.OvenPos));
             
-        return bestAction;
+        return CreateAction(bestAction);
     }
+
+    // Вспомогательный метод для трекинга лупов (Пинг-понг)
+    private BotCommand CreateAction(BotCommand cmd)
+    {
+        if (cmd is Use useCmd) {
+            if (lastActionPos != null && useCmd.Target.Equals(lastActionPos)) {
+                loopCounter++;
+            } else {
+                loopCounter = 0;
+            }
+            lastActionPos = useCmd.Target;
+        } else {
+            loopCounter = 0;
+            lastActionPos = null;
+        }
+        return cmd;
+    }
+
+    // Уход с пути напарника
+    private V DodgePartner(StateInit init, State state)
+    {
+        if (MDist(state.PlayerPos, state.PartnerPos) <= 1 && state.PlayerItem == "NONE")
+        {
+            if (state.PartnerItem is "RAW_TART" or "DOUGH" && MDist(state.PlayerPos, init.OvenPos) <= 2)
+                return init.DishwasherPos; // Отводим от печи
+                
+            if (state.PartnerItem.StartsWith("DISH") && MDist(state.PlayerPos, init.WindowPos) <= 2)
+                return init.DishwasherPos; // Отводим от окна
+        }
+        return null;
+    }
+
     private double EvaluateOrder((string Item, int Award) customer, State state, HashSet<string> myIngredients)
     {
         var ingredients = customer.Item.Split('-').ToHashSet();
@@ -333,18 +410,14 @@ public class Solver
                 foreach (var m in missing)
                 {
                     var isAvailable = GetTableWithItem(m, state) != null;
-                    
                     if (m == "CROISSANT" && state.OvenContents is "CROISSANT" or "DOUGH") isAvailable = true;
                     if (m == "TART" && state.OvenContents is "TART" or "RAW_TART") isAvailable = true;
-                    
                     if (!isAvailable) {
                         allMissingAvailable = false;
                         break;
                     }
                 }
-
-                if (allMissingAvailable) return 
-                    -50000; 
+                if (allMissingAvailable) return -50000; 
             }
         }
 
@@ -358,12 +431,12 @@ public class Solver
         if (state.TurnsRemaining <= 40)
             finalScore = 1000.0 - estimatedTurns + customer.Award / 10000.0;
         else
-            finalScore = (double)customer.Award / Max(1, estimatedTurns);
+            finalScore = (double)customer.Award / Math.Max(1, estimatedTurns);
             
         if (customer.Item == currentOrderId) finalScore += 10000; 
         return finalScore;
     }
-    
+
     private int EstimateIngredientCost(string req, State state, HashSet<string> orderIngredients)
     {
         if (IsItemWithPlayerOrPartner(req, state, orderIngredients)) return 0;
@@ -394,6 +467,7 @@ public class Solver
         }
         return 5;
     }
+
     private static bool IsItemInAnyValidDish(string item, State state, HashSet<string> target)
     {
         foreach (var kvp in state.TablesWithItems)
@@ -406,6 +480,7 @@ public class Solver
         }
         return false;
     }
+
     private static bool IsItemWithPlayerOrPartner(string item, State state, HashSet<string> target)
     {
         if (state.PlayerItem == item || state.PartnerItem == item) return true;
@@ -421,6 +496,7 @@ public class Solver
         }
         return false;
     }
+
     private static bool IsItemWithPartner(string item, State state, HashSet<string> target)
     {
         if (state.PartnerItem == item) return true;
@@ -431,6 +507,7 @@ public class Solver
         }
         return false;
     }
+
     private static V FindEmptyTable(StateInit init, State state, V preferredTarget = null)
     {
         var bestTable = init.DishwasherPos;
@@ -449,6 +526,11 @@ public class Solver
                     var distToPartner = MDist(state.PartnerPos, pos);
                     score = distToMe * 10 - distToPartner; 
                 }
+
+                // ШТРАФ: Не кладем мусор рядом с важными объектами (Печь, Доска, Окно), чтобы не блокировать партнера
+                if (MDist(pos, init.OvenPos) <= 1) score += 500;
+                if (MDist(pos, init.WindowPos) <= 1) score += 500;
+                if (MDist(pos, init.ChoppingBoardPos) <= 1) score += 200;
                 
                 if (score < minScore)
                 {
@@ -459,11 +541,13 @@ public class Solver
         }
         return bestTable;
     }
+
     private V GetTableWithItem(string item, State state)
     {
         foreach (var kvp in state.TablesWithItems)
             if (kvp.Value == item && kvp.Key != init.ChoppingBoardPos) return kvp.Key;
         return null;
     }
-    private static int MDist(V a, V b) => Abs(a.X - b.X) + Abs(a.Y - b.Y);
+
+    private static int MDist(V a, V b) => Math.Abs(a.X - b.X) + Math.Abs(a.Y - b.Y);
 }
