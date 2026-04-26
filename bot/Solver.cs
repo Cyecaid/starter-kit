@@ -2,18 +2,17 @@
 
 public class Solver
 {
-    // Битовые маски для оптимизации
-    private const int NONE = 0;
-    private const int DISH = 1;
-    private const int ICE = 2;
-    private const int BLUE = 4;
-    private const int CHOPPED_STRAW = 8;
-    private const int CROISSANT = 16;
-    private const int TART = 32;
-    private const int STRAW = 64;
-    private const int DOUGH = 128;
-    private const int CHOPPED_DOUGH = 256;
-    private const int RAW_TART = 512;
+    public const int NONE = 0;
+    public const int DISH = 1;
+    public const int ICE = 2;
+    public const int BLUE = 4;
+    public const int CHOPPED_STRAW = 8;
+    public const int CROISSANT = 16;
+    public const int TART = 32;
+    public const int STRAW = 64;
+    public const int DOUGH = 128;
+    public const int CHOPPED_DOUGH = 256;
+    public const int RAW_TART = 512;
 
     public enum CmdType { Use, Wait }
 
@@ -29,6 +28,7 @@ public class Solver
     {
         public int Px, Py;
         public int PlayerItem;
+        public int PartnerItem;
         public int[] Tables = new int[77];
         public int OvenContents;
         public int OvenTimer;
@@ -39,7 +39,7 @@ public class Solver
 
         public void CopyFrom(SimState o)
         {
-            Px = o.Px; Py = o.Py; PlayerItem = o.PlayerItem;
+            Px = o.Px; Py = o.Py; PlayerItem = o.PlayerItem; PartnerItem = o.PartnerItem;
             Array.Copy(o.Tables, Tables, 77);
             OvenContents = o.OvenContents; OvenTimer = o.OvenTimer;
             Score = o.Score; TurnsRemaining = o.TurnsRemaining;
@@ -49,7 +49,6 @@ public class Solver
 
         public int CompareTo(SimState other)
         {
-            // Сортировка по убыванию очков, чтобы лучшие состояния были в начале списка
             return other.EvalScore.CompareTo(this.EvalScore); 
         }
     }
@@ -61,12 +60,13 @@ public class Solver
     private int PartnerX, PartnerY;
     private List<(int Mask, int Award)> ActiveCustomers = new List<(int Mask, int Award)>();
 
-    // Переиспользуемые массивы для предотвращения аллокаций памяти (Zero-GC)
     private int[] bfsDist = new int[77];
     private int[] bfsQx = new int[77];
     private int[] bfsQy = new int[77];
-    private int[] evalDishes = new int[80];
     private V[] validTargets = new V[100];
+    
+    private int neededItemsMask = 0;
+    private bool iAmCloserToOven = true;
     
     private SimState GetState()
     {
@@ -126,8 +126,30 @@ public class Solver
         PartnerX = state.PartnerPos.X;
         PartnerY = state.PartnerPos.Y;
 
+        int ovenX = -1, ovenY = -1;
+        foreach (var eq in Equipment) {
+            if (Map[eq.X, eq.Y] == 'O') { ovenX = eq.X; ovenY = eq.Y; break; }
+        }
+        
+        iAmCloserToOven = true;
+        if (ovenX != -1) {
+            int myDist = Math.Abs(state.PlayerPos.X - ovenX) + Math.Abs(state.PlayerPos.Y - ovenY);
+            int pDist = Math.Abs(PartnerX - ovenX) + Math.Abs(PartnerY - ovenY);
+            if (pDist < myDist) iAmCloserToOven = false;
+        }
+
         ActiveCustomers.Clear();
-        foreach (var c in state.Customers) ActiveCustomers.Add((ParseItem(c.Item), c.Award));
+        int allCustomersMask = 0;
+        foreach (var c in state.Customers) {
+            int mask = ParseItem(c.Item);
+            ActiveCustomers.Add((mask, c.Award));
+            allCustomersMask |= mask;
+        }
+        
+        neededItemsMask = allCustomersMask;
+        if ((neededItemsMask & TART) != 0) { neededItemsMask |= BLUE | CHOPPED_DOUGH | RAW_TART | DOUGH; }
+        if ((neededItemsMask & CROISSANT) != 0) { neededItemsMask |= DOUGH; }
+        if ((neededItemsMask & CHOPPED_STRAW) != 0) { neededItemsMask |= STRAW; }
 
         PoolIndex = 0;
         
@@ -135,6 +157,7 @@ public class Solver
         root.Px = state.PlayerPos.X;
         root.Py = state.PlayerPos.Y;
         root.PlayerItem = ParseItem(state.PlayerItem);
+        root.PartnerItem = ParseItem(state.PartnerItem);
         
         for (int i = 0; i < 77; i++) root.Tables[i] = NONE;
         foreach (var kvp in state.TablesWithItems)
@@ -151,11 +174,10 @@ public class Solver
         List<SimState> currentBeam = new List<SimState>(1000) { root };
         List<MacroAction> actionBuffer = new List<MacroAction>(32);
         
-        int BEAM_WIDTH = 250; // Оптимальная ширина для C# на 50 мс
+        int BEAM_WIDTH = 250; 
         
         for (int depth = 0; depth < 15; depth++)
         {
-            // Главная проверка таймаута перед погружением в новый слой поиска
             if (countdown.TimeAvailable.TotalMilliseconds < 10) break;
 
             List<SimState> nextBeam = new List<SimState>(BEAM_WIDTH * 25);
@@ -163,7 +185,6 @@ public class Solver
 
             foreach (var s in currentBeam)
             {
-                // Регулярно проверяем таймаут внутри луча каждые 20 симуляций
                 if (++stateCount % 20 == 0 && countdown.TimeAvailable.TotalMilliseconds < 5) 
                     break;
 
@@ -190,12 +211,11 @@ public class Solver
                 }
             }
 
-            // Экстренный выход, если прервались по времени внутри цикла
             if (countdown.TimeAvailable.TotalMilliseconds < 5) break;
 
             if (nextBeam.Count > BEAM_WIDTH)
             {
-                nextBeam.Sort(); // Использует IComparable, 0 выделений памяти!
+                nextBeam.Sort(); 
                 nextBeam.RemoveRange(BEAM_WIDTH, nextBeam.Count - BEAM_WIDTH);
             }
             currentBeam = nextBeam;
@@ -215,54 +235,29 @@ public class Solver
         bfsQx[tail] = simState.Px; bfsQy[tail] = simState.Py; tail++;
         bfsDist[simState.Px + simState.Py * 11] = 0;
 
-        // Скоростной развернутый BFS
         while (head < tail)
         {
             int cx = bfsQx[head], cy = bfsQy[head]; head++;
             int cd = bfsDist[cx + cy * 11];
             
             int nx = cx + 1, ny = cy;
-            if (nx < 11 && (Map[nx, ny] == '.' || Map[nx, ny] == '0' || Map[nx, ny] == '1'))
-            {
-                if ((nx != PartnerX || ny != PartnerY) && bfsDist[nx + ny * 11] == -1)
-                {
-                    bfsDist[nx + ny * 11] = cd + 1;
-                    bfsQx[tail] = nx; bfsQy[tail] = ny; tail++;
-                }
-            }
+            if (nx < 11 && (Map[nx, ny] == '.' || Map[nx, ny] == '0' || Map[nx, ny] == '1') && (nx != PartnerX || ny != PartnerY) && bfsDist[nx + ny * 11] == -1)
+            { bfsDist[nx + ny * 11] = cd + 1; bfsQx[tail] = nx; bfsQy[tail] = ny; tail++; }
             nx = cx - 1; ny = cy;
-            if (nx >= 0 && (Map[nx, ny] == '.' || Map[nx, ny] == '0' || Map[nx, ny] == '1'))
-            {
-                if ((nx != PartnerX || ny != PartnerY) && bfsDist[nx + ny * 11] == -1)
-                {
-                    bfsDist[nx + ny * 11] = cd + 1;
-                    bfsQx[tail] = nx; bfsQy[tail] = ny; tail++;
-                }
-            }
+            if (nx >= 0 && (Map[nx, ny] == '.' || Map[nx, ny] == '0' || Map[nx, ny] == '1') && (nx != PartnerX || ny != PartnerY) && bfsDist[nx + ny * 11] == -1)
+            { bfsDist[nx + ny * 11] = cd + 1; bfsQx[tail] = nx; bfsQy[tail] = ny; tail++; }
             nx = cx; ny = cy + 1;
-            if (ny < 7 && (Map[nx, ny] == '.' || Map[nx, ny] == '0' || Map[nx, ny] == '1'))
-            {
-                if ((nx != PartnerX || ny != PartnerY) && bfsDist[nx + ny * 11] == -1)
-                {
-                    bfsDist[nx + ny * 11] = cd + 1;
-                    bfsQx[tail] = nx; bfsQy[tail] = ny; tail++;
-                }
-            }
+            if (ny < 7 && (Map[nx, ny] == '.' || Map[nx, ny] == '0' || Map[nx, ny] == '1') && (nx != PartnerX || ny != PartnerY) && bfsDist[nx + ny * 11] == -1)
+            { bfsDist[nx + ny * 11] = cd + 1; bfsQx[tail] = nx; bfsQy[tail] = ny; tail++; }
             nx = cx; ny = cy - 1;
-            if (ny >= 0 && (Map[nx, ny] == '.' || Map[nx, ny] == '0' || Map[nx, ny] == '1'))
-            {
-                if ((nx != PartnerX || ny != PartnerY) && bfsDist[nx + ny * 11] == -1)
-                {
-                    bfsDist[nx + ny * 11] = cd + 1;
-                    bfsQx[tail] = nx; bfsQy[tail] = ny; tail++;
-                }
-            }
+            if (ny >= 0 && (Map[nx, ny] == '.' || Map[nx, ny] == '0' || Map[nx, ny] == '1') && (nx != PartnerX || ny != PartnerY) && bfsDist[nx + ny * 11] == -1)
+            { bfsDist[nx + ny * 11] = cd + 1; bfsQx[tail] = nx; bfsQy[tail] = ny; tail++; }
         }
 
         int bestEmptyDist1 = 999, bestEmptyDist2 = 999;
         V empty1 = new V(-1, -1), empty2 = new V(-1, -1);
-        
         int numTargets = 0;
+        
         for (int i = 0; i < Equipment.Count; i++) validTargets[numTargets++] = Equipment[i];
 
         for (int i = 0; i < 77; i++)
@@ -297,30 +292,35 @@ public class Solver
             int pItem = simState.PlayerItem;
             bool useful = false;
 
-            if (mapChar == 'D') useful = (pItem == NONE || (pItem & 1) != 0);
-            else if (mapChar == 'W') useful = ((pItem & 1) != 0);
-            else if (mapChar == 'B' || mapChar == 'I' || mapChar == 'S' || mapChar == 'H') useful = (pItem == NONE);
-            else if (mapChar == 'C')
+            if (mapChar == 'D') useful = (pItem == NONE);
+            else if (mapChar == 'W') useful = ((pItem & DISH) != 0);
+            else if (mapChar == 'B') useful = (pItem == NONE || ((pItem & DISH) != 0 && (pItem & BLUE) == 0)) && ((neededItemsMask & BLUE) != 0);
+            else if (mapChar == 'I') useful = (pItem == NONE || ((pItem & DISH) != 0 && (pItem & ICE) == 0)) && ((neededItemsMask & ICE) != 0);
+            else if (mapChar == 'S') useful = (pItem == NONE) && ((neededItemsMask & STRAW) != 0);
+            else if (mapChar == 'H') useful = (pItem == NONE) && ((neededItemsMask & DOUGH) != 0);
+            else if (mapChar == 'C' || mapChar == '#')
             {
-                if ((pItem == STRAW || pItem == DOUGH) && tableItem == NONE) useful = true;
+                if (mapChar == 'C' && (pItem == STRAW || pItem == DOUGH) && tableItem == NONE) useful = true;
                 else if (pItem == NONE && tableItem != NONE) useful = true;
                 else if (pItem != NONE && tableItem == NONE) useful = true;
+                else if ((pItem & DISH) != 0 && tableItem != NONE && (tableItem == ICE || tableItem == BLUE || tableItem == CHOPPED_STRAW || tableItem == CROISSANT || tableItem == TART) && (pItem & tableItem) == 0) useful = true;
+                else if ((tableItem & DISH) != 0 && pItem != NONE && (pItem == ICE || pItem == BLUE || pItem == CHOPPED_STRAW || pItem == CROISSANT || pItem == TART) && (tableItem & pItem) == 0) useful = true;
+                else if ((pItem == BLUE && tableItem == CHOPPED_DOUGH) || (pItem == CHOPPED_DOUGH && tableItem == BLUE)) useful = true;
             }
             else if (mapChar == 'O')
             {
                 if ((pItem == DOUGH || pItem == RAW_TART) && simState.OvenContents == NONE) useful = true;
-                else if (pItem == NONE || (pItem & 1) != 0)
+                else if (pItem == NONE)
                 {
                     if (simState.OvenContents == CROISSANT || simState.OvenContents == TART) useful = true;
                     if (simState.OvenContents == DOUGH || simState.OvenContents == RAW_TART) useful = true;
                 }
-            }
-            else if (mapChar == '#')
-            {
-                if (pItem == NONE && tableItem != NONE) useful = true;
-                else if (pItem != NONE && tableItem == NONE) useful = true;
-                else if ((pItem & 1) != 0 && tableItem != NONE && (tableItem == ICE || tableItem == BLUE || tableItem == CHOPPED_STRAW || tableItem == CROISSANT || tableItem == TART)) useful = true;
-                else if ((pItem == BLUE && tableItem == CHOPPED_DOUGH) || (pItem == CHOPPED_DOUGH && tableItem == BLUE)) useful = true;
+                else if ((pItem & DISH) != 0)
+                {
+                    if (simState.OvenContents == CROISSANT && (pItem & CROISSANT) == 0) useful = true;
+                    if (simState.OvenContents == TART && (pItem & TART) == 0) useful = true;
+                    if (simState.OvenContents == DOUGH || simState.OvenContents == RAW_TART) useful = true;
+                }
             }
 
             if (!useful) continue;
@@ -334,7 +334,7 @@ public class Solver
                 int waitTime = Math.Max(0, simState.OvenTimer - travelTime);
                 actions.Add(new MacroAction {
                     TargetX = tx, TargetY = ty, EndPx = endPx, EndPy = endPy,
-                    Type = md == 0 ? CmdType.Wait : CmdType.Use,
+                    Type = (md == 0 && waitTime > 0) ? CmdType.Wait : CmdType.Use,
                     Cost = travelTime + waitTime + 1
                 });
             }
@@ -351,7 +351,7 @@ public class Solver
 
     private int GetMinAdjacentDist(int tx, int ty, int[] dist, out int bestNx, out int bestNy)
     {
-        int minD = 999; bestNx = -1; bestNy = -1;
+        int minD = 999; bestNx = -1; bestNy = -1; int bestDistToPartner = -1;
         for (int dx = -1; dx <= 1; dx++)
         {
             for (int dy = -1; dy <= 1; dy++)
@@ -361,9 +361,13 @@ public class Solver
                 if (nx >= 0 && nx < 11 && ny >= 0 && ny < 7)
                 {
                     int d = dist[nx + ny * 11];
-                    if (d != -1 && d < minD)
+                    if (d != -1)
                     {
-                        minD = d; bestNx = nx; bestNy = ny;
+                        int distToP = Math.Abs(nx - PartnerX) + Math.Abs(ny - PartnerY);
+                        if (d < minD || (d == minD && distToP > bestDistToPartner))
+                        {
+                            minD = d; bestNx = nx; bestNy = ny; bestDistToPartner = distToP;
+                        }
                     }
                 }
             }
@@ -371,7 +375,7 @@ public class Solver
         return minD == 999 ? -1 : minD;
     }
 
-    private void ApplyAction(SimState simState, MacroAction action)
+    public void ApplyAction(SimState simState, MacroAction action)
     {
         int turns = action.Cost;
         simState.TurnsRemaining -= turns;
@@ -388,7 +392,9 @@ public class Solver
                     else if (simState.OvenContents == RAW_TART) { simState.OvenContents = TART; simState.OvenTimer = 10; }
                     else if (simState.OvenContents == CROISSANT || simState.OvenContents == TART)
                     {
-                        simState.OvenContents = NONE; simState.Score -= 50000; 
+                        simState.OvenContents = NONE; 
+                        if (iAmCloserToOven) simState.Score -= 50000;
+                        else simState.Score -= 2000;
                     }
                 }
             }
@@ -404,125 +410,107 @@ public class Solver
         int tableItem = simState.Tables[tableIdx];
         int pItem = simState.PlayerItem;
 
-        if (mapChar == 'D')
-        {
-            if (pItem == NONE || (pItem & 1) != 0) simState.PlayerItem = DISH;
-        }
+        if (mapChar == 'D') { if (pItem == NONE) simState.PlayerItem = DISH; }
         else if (mapChar == 'W')
         {
-            if ((pItem & 1) != 0)
+            if ((pItem & DISH) != 0)
             {
                 bool matched = false;
-                foreach (var c in ActiveCustomers)
-                {
-                    if (pItem == c.Mask)
-                    {
-                        simState.Score += 100000 + c.Award;
-                        simState.PlayerItem = NONE;
-                        matched = true; break;
-                    }
+                foreach (var c in ActiveCustomers) {
+                    if (pItem == c.Mask) { simState.Score += 100000 + c.Award; simState.PlayerItem = NONE; matched = true; break; }
                 }
                 if (!matched) simState.PlayerItem = NONE;
             }
         }
-        else if (mapChar == 'B') { if (pItem == NONE) simState.PlayerItem = BLUE; }
-        else if (mapChar == 'I') { if (pItem == NONE) simState.PlayerItem = ICE; }
+        else if (mapChar == 'B') { 
+            if (pItem == NONE) simState.PlayerItem = BLUE; 
+            else if ((pItem & DISH) != 0 && (pItem & BLUE) == 0) simState.PlayerItem |= BLUE; 
+        }
+        else if (mapChar == 'I') { 
+            if (pItem == NONE) simState.PlayerItem = ICE; 
+            else if ((pItem & DISH) != 0 && (pItem & ICE) == 0) simState.PlayerItem |= ICE; 
+        }
         else if (mapChar == 'S') { if (pItem == NONE) simState.PlayerItem = STRAW; }
         else if (mapChar == 'H') { if (pItem == NONE) simState.PlayerItem = DOUGH; }
-        else if (mapChar == 'C')
+        else if (mapChar == 'C' || mapChar == '#')
         {
-            if (pItem == STRAW) { simState.Tables[tableIdx] = CHOPPED_STRAW; simState.PlayerItem = NONE; }
-            else if (pItem == DOUGH) { simState.Tables[tableIdx] = CHOPPED_DOUGH; simState.PlayerItem = NONE; }
+            if (mapChar == 'C' && pItem == STRAW && tableItem == NONE) { simState.Tables[tableIdx] = CHOPPED_STRAW; simState.PlayerItem = NONE; }
+            else if (mapChar == 'C' && pItem == DOUGH && tableItem == NONE) { simState.Tables[tableIdx] = CHOPPED_DOUGH; simState.PlayerItem = NONE; }
             else if (pItem == NONE && tableItem != NONE) { simState.PlayerItem = tableItem; simState.Tables[tableIdx] = NONE; }
             else if (pItem != NONE && tableItem == NONE) { simState.Tables[tableIdx] = pItem; simState.PlayerItem = NONE; }
+            else if ((pItem & DISH) != 0 && tableItem != NONE && (tableItem == ICE || tableItem == BLUE || tableItem == CHOPPED_STRAW || tableItem == CROISSANT || tableItem == TART) && (pItem & tableItem) == 0)
+            { simState.PlayerItem |= tableItem; simState.Tables[tableIdx] = NONE; }
+            else if ((tableItem & DISH) != 0 && pItem != NONE && (pItem == ICE || pItem == BLUE || pItem == CHOPPED_STRAW || pItem == CROISSANT || pItem == TART) && (tableItem & pItem) == 0)
+            { simState.Tables[tableIdx] |= pItem; simState.PlayerItem = NONE; }
+            else if ((pItem == BLUE && tableItem == CHOPPED_DOUGH) || (pItem == CHOPPED_DOUGH && tableItem == BLUE))
+            { simState.PlayerItem = NONE; simState.Tables[tableIdx] = RAW_TART; }
         }
         else if (mapChar == 'O')
         {
             if (pItem == DOUGH && simState.OvenContents == NONE) { simState.OvenContents = DOUGH; simState.OvenTimer = 10; simState.PlayerItem = NONE; }
             else if (pItem == RAW_TART && simState.OvenContents == NONE) { simState.OvenContents = RAW_TART; simState.OvenTimer = 10; simState.PlayerItem = NONE; }
             else if (pItem == NONE && (simState.OvenContents == CROISSANT || simState.OvenContents == TART)) { simState.PlayerItem = simState.OvenContents; simState.OvenContents = NONE; simState.OvenTimer = 0; }
-            else if ((pItem & 1) != 0 && (simState.OvenContents == CROISSANT || simState.OvenContents == TART)) { simState.PlayerItem |= simState.OvenContents; simState.OvenContents = NONE; simState.OvenTimer = 0; }
-        }
-        else if (mapChar == '#')
-        {
-            if (pItem == NONE && tableItem != NONE) { simState.PlayerItem = tableItem; simState.Tables[tableIdx] = NONE; }
-            else if (pItem != NONE && tableItem == NONE) { simState.Tables[tableIdx] = pItem; simState.PlayerItem = NONE; }
-            else if ((pItem & 1) != 0 && tableItem != NONE && (tableItem == ICE || tableItem == BLUE || tableItem == CHOPPED_STRAW || tableItem == CROISSANT || tableItem == TART))
-            {
-                simState.PlayerItem |= tableItem; simState.Tables[tableIdx] = NONE;
-            }
-            else if ((pItem == BLUE && tableItem == CHOPPED_DOUGH) || (pItem == CHOPPED_DOUGH && tableItem == BLUE))
-            {
-                simState.PlayerItem = NONE; simState.Tables[tableIdx] = RAW_TART; 
-            }
+            else if ((pItem & DISH) != 0 && (simState.OvenContents == CROISSANT || simState.OvenContents == TART) && (pItem & simState.OvenContents) == 0) { simState.PlayerItem |= simState.OvenContents; simState.OvenContents = NONE; simState.OvenTimer = 0; }
         }
     }
 
     private int Evaluate(SimState simState)
     {
         int score = simState.Score;
-        int numDishes = 0;
-        if ((simState.PlayerItem & 1) != 0) evalDishes[numDishes++] = simState.PlayerItem;
-        for (int i = 0; i < 77; i++)
-        {
-            if ((simState.Tables[i] & 1) != 0) evalDishes[numDishes++] = simState.Tables[i];
-        }
-
-        foreach (var c in ActiveCustomers)
-        {
-            int bestDishScore = 0;
-            int bestDish = 0, maxCount = -1;
-
-            for (int i = 0; i < numDishes; i++)
-            {
-                int dish = evalDishes[i];
-                if ((dish & ~c.Mask) == 0) 
-                {
-                    int count = BitCount(dish);
-                    int s = (count - 1) * 2000;
-                    if (s > bestDishScore) bestDishScore = s;
-
-                    if (count > maxCount) { maxCount = count; bestDish = dish; }
+        
+        Span<int> uniquePlates = stackalloc int[80];
+        Span<int> uniquePlatesCounts = stackalloc int[80];
+        int numUniquePlates = 0;
+        
+        // Делаем функции статическими и передаем всё через параметры
+        static void AddPlate(int p, Span<int> plates, Span<int> counts, ref int numUnique) {
+            if ((p & DISH) == 0) return;
+            for (int j = 0; j < numUnique; j++) {
+                if (plates[j] == p) {
+                    counts[j]++;
+                    return;
                 }
             }
-            score += bestDishScore;
-
-            int missingMask = c.Mask & ~bestDish;
-            int missingScore = 0;
-            if ((missingMask & CROISSANT) != 0)
-            {
-                if (HasItem(simState, CROISSANT)) missingScore += 800;
-                else if (simState.OvenContents == CROISSANT) missingScore += 600;
-                else if (simState.OvenContents == DOUGH) missingScore += 400;
-                else if (HasItem(simState, DOUGH)) missingScore += 200;
-            }
-            if ((missingMask & TART) != 0)
-            {
-                if (HasItem(simState, TART)) missingScore += 800;
-                else if (simState.OvenContents == TART) missingScore += 600;
-                else if (simState.OvenContents == RAW_TART) missingScore += 400;
-                else if (HasItem(simState, RAW_TART)) missingScore += 300;
-                else if (HasItem(simState, CHOPPED_DOUGH)) missingScore += 200;
-                else if (HasItem(simState, DOUGH)) missingScore += 100;
-            }
-            if ((missingMask & CHOPPED_STRAW) != 0)
-            {
-                if (HasItem(simState, CHOPPED_STRAW)) missingScore += 800;
-                else if (HasItem(simState, STRAW)) missingScore += 400;
-            }
-            if ((missingMask & BLUE) != 0 && HasItem(simState, BLUE)) missingScore += 800;
-            if ((missingMask & ICE) != 0 && HasItem(simState, ICE)) missingScore += 800;
-            
-            score += missingScore;
+            plates[numUnique] = p;
+            counts[numUnique] = 1;
+            numUnique++;
         }
+        
+        AddPlate(simState.PlayerItem, uniquePlates, uniquePlatesCounts, ref numUniquePlates);
+        AddPlate(simState.PartnerItem, uniquePlates, uniquePlatesCounts, ref numUniquePlates);
+        for (int i = 0; i < 77; i++) AddPlate(simState.Tables[i], uniquePlates, uniquePlatesCounts, ref numUniquePlates);
 
-        if ((simState.PlayerItem & 1) != 0)
+        Span<int> loose = stackalloc int[10];
+        loose.Clear();
+        
+        static void AddLoose(int item, Span<int> l) {
+            if ((item & DISH) != 0) return;
+            if (item == CROISSANT) l[0]++;
+            else if (item == TART) l[1]++;
+            else if (item == CHOPPED_STRAW) l[2]++;
+            else if (item == BLUE) l[3]++;
+            else if (item == ICE) l[4]++;
+            else if (item == DOUGH) l[5]++;
+            else if (item == RAW_TART) l[6]++;
+            else if (item == STRAW) l[7]++;
+            else if (item == CHOPPED_DOUGH) l[8]++;
+        }
+        
+        AddLoose(simState.PlayerItem, loose);
+        AddLoose(simState.PartnerItem, loose);
+        for (int i = 0; i < 77; i++) AddLoose(simState.Tables[i], loose);
+        
+        // В MatchCustomers теперь передаем Span loose напрямую
+        int bestMatchingScore = MatchCustomers(0, uniquePlates, uniquePlatesCounts, numUniquePlates, loose, simState, 0);
+        score += bestMatchingScore;
+
+        if ((simState.PlayerItem & DISH) != 0)
         {
-            score += 50;
             bool complete = false;
             foreach (var c in ActiveCustomers) { if (simState.PlayerItem == c.Mask) complete = true; }
             if (complete)
             {
+                score += 50;
                 V window = new V(-1, -1);
                 for (int i = 0; i < Equipment.Count; i++) {
                     if (Map[Equipment[i].X, Equipment[i].Y] == 'W') { window = Equipment[i]; break; }
@@ -537,10 +525,90 @@ public class Solver
         return score;
     }
 
-    private bool HasItem(SimState simState, int item)
+    private int MatchCustomers(int cIdx, Span<int> uniquePlates, Span<int> uniquePlatesCounts, int numUniquePlates, Span<int> loose, SimState simState, int ovenUsedMask)
     {
-        if (simState.PlayerItem == item) return true;
-        for (int i = 0; i < 77; i++) if (simState.Tables[i] == item) return true;
-        return false;
+        if (cIdx >= ActiveCustomers.Count) return 0;
+        
+        var c = ActiveCustomers[cIdx];
+        int bestScore = 0;
+        
+        // Выделяем looseChanges один раз на уровень рекурсии
+        Span<int> looseChanges = stackalloc int[10];
+        
+        for (int i = 0; i < numUniquePlates; i++)
+        {
+            if (uniquePlatesCounts[i] == 0) continue;
+            int dish = uniquePlates[i];
+            
+            if ((dish & ~c.Mask) == 0) 
+            {
+                uniquePlatesCounts[i]--;
+                int count = BitCount(dish);
+                int currentScore = (count - 1) * 2000;
+                
+                int missingMask = c.Mask & ~dish;
+                looseChanges.Clear();
+                int ovenChanges = 0;
+                
+                currentScore += EvalMissingMutate(missingMask, loose, simState, ref ovenUsedMask, looseChanges, ref ovenChanges);
+                currentScore += MatchCustomers(cIdx + 1, uniquePlates, uniquePlatesCounts, numUniquePlates, loose, simState, ovenUsedMask);
+                
+                // Возвращаем состояние ингредиентов
+                for(int j=0; j<10; j++) loose[j] += looseChanges[j];
+                ovenUsedMask &= ~ovenChanges;
+                
+                if (currentScore > bestScore) bestScore = currentScore;
+                
+                uniquePlatesCounts[i]++;
+            }
+        }
+        
+        // Вариант: не пытаться выполнить этот заказ этой тарелкой
+        looseChanges.Clear();
+        int ovenChanges2 = 0;
+        int noPlateScore = EvalMissingMutate(c.Mask, loose, simState, ref ovenUsedMask, looseChanges, ref ovenChanges2);
+        noPlateScore += MatchCustomers(cIdx + 1, uniquePlates, uniquePlatesCounts, numUniquePlates, loose, simState, ovenUsedMask);
+        
+        for(int j=0; j<10; j++) loose[j] += looseChanges[j];
+        ovenUsedMask &= ~ovenChanges2;
+        
+        if (noPlateScore > bestScore) bestScore = noPlateScore;
+        
+        return bestScore;
+    }
+
+    private int EvalMissingMutate(int missingMask, Span<int> loose, SimState simState, ref int ovenUsedMask, Span<int> looseChanges, ref int ovenChanges)
+    {
+        int missingScore = 0;
+        if ((missingMask & CROISSANT) != 0)
+        {
+            if (loose[0] > 0) { loose[0]--; looseChanges[0]++; missingScore += 800; }
+            else if ((ovenUsedMask & CROISSANT) == 0 && simState.OvenContents == CROISSANT) { ovenUsedMask |= CROISSANT; ovenChanges |= CROISSANT; missingScore += 600; }
+            else if ((ovenUsedMask & DOUGH) == 0 && simState.OvenContents == DOUGH) { ovenUsedMask |= DOUGH; ovenChanges |= DOUGH; missingScore += 400; }
+            else if (loose[5] > 0) { loose[5]--; looseChanges[5]++; missingScore += 200; } 
+        }
+        if ((missingMask & TART) != 0)
+        {
+            if (loose[1] > 0) { loose[1]--; looseChanges[1]++; missingScore += 800; }
+            else if ((ovenUsedMask & TART) == 0 && simState.OvenContents == TART) { ovenUsedMask |= TART; ovenChanges |= TART; missingScore += 600; }
+            else if ((ovenUsedMask & RAW_TART) == 0 && simState.OvenContents == RAW_TART) { ovenUsedMask |= RAW_TART; ovenChanges |= RAW_TART; missingScore += 400; }
+            else if (loose[6] > 0) { loose[6]--; looseChanges[6]++; missingScore += 300; } 
+            else if (loose[8] > 0) { loose[8]--; looseChanges[8]++; missingScore += 200; } 
+            else if (loose[5] > 0) { loose[5]--; looseChanges[5]++; missingScore += 100; } 
+        }
+        if ((missingMask & CHOPPED_STRAW) != 0)
+        {
+            if (loose[2] > 0) { loose[2]--; looseChanges[2]++; missingScore += 800; }
+            else if (loose[7] > 0) { loose[7]--; looseChanges[7]++; missingScore += 400; } 
+        }
+        if ((missingMask & BLUE) != 0)
+        {
+             if (loose[3] > 0) { loose[3]--; looseChanges[3]++; missingScore += 800; }
+        }
+        if ((missingMask & ICE) != 0)
+        {
+             if (loose[4] > 0) { loose[4]--; looseChanges[4]++; missingScore += 800; }
+        }
+        return missingScore;
     }
 }
