@@ -53,20 +53,14 @@ public class StateTests
             var state = frameReader.ReadState(init);
 
             var sw = Stopwatch.StartNew();
-                
-            // Эмулируем лимит времени на ход (в игре это 50 мс, даем чуть больше для локального запуска)
             var move = solver.GetCommand(state, new Countdown(TimeSpan.FromMilliseconds(50)));
                 
             sw.Stop();
-
-            // Выводим результат хода
             Console.WriteLine($"Turn {i + 1}:");
             Console.WriteLine($"  Decision : {move}");
             Console.WriteLine($"  Time     : {sw.ElapsedMilliseconds} ms");
-                
-            // Проверки (Asserts)
             Assert.IsNotNull(move, $"Бот вернул null на ходу {i + 1}");
-            Assert.Less(sw.ElapsedMilliseconds, 150, $"Бот превысил лимит времени на ходу {i + 1}!");
+            Assert.Less(sw.ElapsedMilliseconds, i == 0 ? 500 : 50, $"Бот превысил лимит времени на ходу {i + 1}!");
         }
             
         Console.WriteLine(new string('-', 40));
@@ -109,7 +103,7 @@ public class StateTests
             Tables = new int[77]
         };
             
-        int tableIdx = tx + ty * 11;
+        var tableIdx = tx + ty * 11;
         simState.Tables[tableIdx] = Solver.NONE; 
         SetMapChar(tx, ty, 'C');
 
@@ -186,7 +180,134 @@ public class StateTests
         _solver.ApplyAction(simState, waitAction);
 
         Assert.AreEqual(Solver.NONE, simState.OvenContents, "Духовка должна очиститься после сгорания еды.");
-        Assert.Less(simState.Score, -1000, "Должен быть начислен весомый штраф за сгоревшую еду.");
+        Assert.Less(simState.Score, -1000, "Должен быть начислен штраф за сгоревшую еду.");
+    }
+    
+    [Test]
+    public void SimulationRule_Table_DropItemOnEmptyTable()
+    {
+        var simState = new Solver.SimState {
+            PlayerItem = Solver.CROISSANT,
+            Tables = new int[77],
+            Px = 0, Py = 0
+        };
+        
+        SetMapChar(1, 0, '#');
+
+        var action = new Solver.MacroAction { TargetX = 1, TargetY = 0, Type = Solver.CmdType.Use, Cost = 1 };
+        _solver.ApplyAction(simState, action);
+
+        Assert.AreEqual(Solver.NONE, simState.PlayerItem, "Игрок должен освободить руки.");
+        Assert.AreEqual(Solver.CROISSANT, simState.Tables[1 + 0 * 11], "Круассан должен остаться на столе.");
+    }
+
+    [Test]
+    public void SimulationRule_Table_PickUpItemFromTable()
+    {
+        var simState = new Solver.SimState {
+            PlayerItem = Solver.NONE,
+            Tables = new int[77],
+            Px = 0, Py = 0
+        };
+        
+        const int tableIdx = 1 + 0 * 11;
+        simState.Tables[tableIdx] = Solver.TART;
+        SetMapChar(1, 0, '#');
+
+        var action = new Solver.MacroAction { TargetX = 1, TargetY = 0, Type = Solver.CmdType.Use, Cost = 1 };
+        _solver.ApplyAction(simState, action);
+
+        Assert.AreEqual(Solver.TART, simState.PlayerItem, "Игрок должен забрать Тарт со стола.");
+        Assert.AreEqual(Solver.NONE, simState.Tables[tableIdx], "Стол должен стать пустым.");
+    }
+
+    [Test]
+    public void SimulationRule_Combine_BlueberriesAndChoppedDough_MakesRawTart()
+    {
+        var simState = new Solver.SimState {
+            PlayerItem = Solver.BLUE,
+            Tables = new int[77]
+        };
+        
+        const int tableIdx = 1 + 0 * 11;
+        simState.Tables[tableIdx] = Solver.CHOPPED_DOUGH;
+        SetMapChar(1, 0, '#'); 
+
+        var action = new Solver.MacroAction { TargetX = 1, TargetY = 0, Type = Solver.CmdType.Use, Cost = 1 };
+        _solver.ApplyAction(simState, action);
+
+        Assert.AreEqual(Solver.NONE, simState.PlayerItem, "Руки игрока должны опустеть.");
+        Assert.AreEqual(Solver.RAW_TART, simState.Tables[tableIdx], "На столе должен появиться Сырой Тарт (RAW_TART).");
+    }
+
+    [Test]
+    public void SimulationRule_Combine_AddIngredientToExistingDishOnTable()
+    {
+        var simState = new Solver.SimState {
+            PlayerItem = Solver.ICE,
+            Tables = new int[77]
+        };
+        
+        const int tableIdx = 1 + 0 * 11;
+        simState.Tables[tableIdx] = Solver.DISH | Solver.BLUE;
+        SetMapChar(1, 0, '#'); 
+
+        var action = new Solver.MacroAction { TargetX = 1, TargetY = 0, Type = Solver.CmdType.Use, Cost = 1 };
+        _solver.ApplyAction(simState, action);
+
+        Assert.AreEqual(Solver.NONE, simState.PlayerItem, "Игрок кладет мороженое.");
+        Assert.AreEqual(Solver.DISH | Solver.BLUE | Solver.ICE, simState.Tables[tableIdx], 
+            "На столе должна оказаться тарелка с черникой И мороженым.");
+    }
+
+    [Test]
+    public void SimulationRule_Dishwasher_TakesNewDish()
+    {
+        var simState = new Solver.SimState {
+            PlayerItem = Solver.NONE
+        };
+        SetMapChar(1, 0, 'D');
+
+        var action = new Solver.MacroAction { TargetX = 1, TargetY = 0, Type = Solver.CmdType.Use, Cost = 1 };
+        _solver.ApplyAction(simState, action);
+
+        Assert.AreEqual(Solver.DISH, simState.PlayerItem, "Игрок должен взять новую тарелку из посудомоечной машины.");
+    }
+
+    [Test]
+    public void SimulationRule_Oven_TakeOutCookedFood()
+    {
+        var simState = new Solver.SimState {
+            PlayerItem = Solver.NONE,
+            OvenContents = Solver.CROISSANT,
+            OvenTimer = 5
+        };
+        SetMapChar(1, 0, 'O');
+
+        var action = new Solver.MacroAction { TargetX = 1, TargetY = 0, Type = Solver.CmdType.Use, Cost = 1 };
+        _solver.ApplyAction(simState, action);
+
+        Assert.AreEqual(Solver.CROISSANT, simState.PlayerItem, "Игрок должен достать круассан из духовки.");
+        Assert.AreEqual(Solver.NONE, simState.OvenContents, "Духовка должна стать пустой.");
+        Assert.AreEqual(0, simState.OvenTimer, "Таймер духовки должен сброситься.");
+    }
+
+    [Test]
+    public void SimulationRule_Oven_AddDirectlyToDish()
+    {
+        var simState = new Solver.SimState {
+            PlayerItem = Solver.DISH | Solver.ICE,
+            OvenContents = Solver.TART,
+            OvenTimer = 8
+        };
+        SetMapChar(1, 0, 'O');
+
+        var action = new Solver.MacroAction { TargetX = 1, TargetY = 0, Type = Solver.CmdType.Use, Cost = 1 };
+        _solver.ApplyAction(simState, action);
+
+        Assert.AreEqual(Solver.DISH | Solver.ICE | Solver.TART, simState.PlayerItem, 
+            "Тарт должен переместиться из духовки прямо на тарелку в руках игрока.");
+        Assert.AreEqual(Solver.NONE, simState.OvenContents, "Духовка должна опустеть.");
     }
         
 
@@ -195,14 +316,14 @@ public class StateTests
         var mapField = typeof(Solver).GetField("Map", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         var map = (char[,])mapField.GetValue(_solver);
             
-        for (int i=0; i<11; i++) 
-        for (int j=0; j<7; j++) 
+        for (var i=0; i<11; i++) 
+        for (var j=0; j<7; j++) 
             if (map[i,j] == c) map[i,j] = '#'; 
 
         map[x, y] = c;
     }
 
-    private State CreateDummyState()
+    private static State CreateDummyState()
     {
         var init = new StateInit { NumAllCustomers = 1, Map = new char[11, 7] };
         for (var x=0; x<11; x++) for (var y=0; y<7; y++) init.Map[x,y] = '.';

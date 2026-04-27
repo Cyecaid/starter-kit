@@ -67,6 +67,10 @@ public class Solver
     
     private int neededItemsMask = 0;
     private bool iAmCloserToOven = true;
+    private V WindowPos = new V(-1, -1);
+    private V OvenPos = new V(-1, -1);
+    private bool partnerWantsWindow = false;
+    private bool partnerWantsOven = false;
     
     private SimState GetState()
     {
@@ -110,6 +114,9 @@ public class Solver
         }
 
         Map = state.Init.Map;
+        WindowPos = new V(-1, -1);
+        OvenPos = new V(-1, -1);
+        
         if (Equipment == null)
         {
             Equipment = new List<V>();
@@ -119,24 +126,18 @@ public class Solver
                 {
                     char c = Map[x, y];
                     if ("DWBISHCO".Contains(c)) Equipment.Add(new V(x, y));
+                    if (c == 'W') WindowPos = new V(x, y);
+                    if (c == 'O') OvenPos = new V(x, y);
                 }
             }
         }
 
         PartnerX = state.PartnerPos.X;
         PartnerY = state.PartnerPos.Y;
-
-        int ovenX = -1, ovenY = -1;
-        foreach (var eq in Equipment) {
-            if (Map[eq.X, eq.Y] == 'O') { ovenX = eq.X; ovenY = eq.Y; break; }
-        }
+        int pItemMask = ParseItem(state.PartnerItem);
         
-        iAmCloserToOven = true;
-        if (ovenX != -1) {
-            int myDist = Math.Abs(state.PlayerPos.X - ovenX) + Math.Abs(state.PlayerPos.Y - ovenY);
-            int pDist = Math.Abs(PartnerX - ovenX) + Math.Abs(PartnerY - ovenY);
-            if (pDist < myDist) iAmCloserToOven = false;
-        }
+        partnerWantsWindow = false;
+        partnerWantsOven = false;
 
         ActiveCustomers.Clear();
         int allCustomersMask = 0;
@@ -144,6 +145,21 @@ public class Solver
             int mask = ParseItem(c.Item);
             ActiveCustomers.Add((mask, c.Award));
             allCustomersMask |= mask;
+            if ((pItemMask & DISH) != 0 && (pItemMask & ~mask) == 0 && BitCount(pItemMask) == BitCount(mask)) {
+                partnerWantsWindow = true;
+            }
+        }
+        
+        iAmCloserToOven = true;
+        if (OvenPos.X != -1) {
+            int myDist = Math.Abs(state.PlayerPos.X - OvenPos.X) + Math.Abs(state.PlayerPos.Y - OvenPos.Y);
+            int pDist = Math.Abs(PartnerX - OvenPos.X) + Math.Abs(PartnerY - OvenPos.Y);
+            if (pDist < myDist) iAmCloserToOven = false;
+            
+            if (!iAmCloserToOven) {
+                if (pItemMask == DOUGH || pItemMask == RAW_TART) partnerWantsOven = true;
+                if (ParseItem(state.OvenContents) != NONE) partnerWantsOven = true;
+            }
         }
         
         neededItemsMask = allCustomersMask;
@@ -157,7 +173,7 @@ public class Solver
         root.Px = state.PlayerPos.X;
         root.Py = state.PlayerPos.Y;
         root.PlayerItem = ParseItem(state.PlayerItem);
-        root.PartnerItem = ParseItem(state.PartnerItem);
+        root.PartnerItem = pItemMask;
         
         for (int i = 0; i < 77; i++) root.Tables[i] = NONE;
         foreach (var kvp in state.TablesWithItems)
@@ -174,9 +190,9 @@ public class Solver
         List<SimState> currentBeam = new List<SimState>(1000) { root };
         List<MacroAction> actionBuffer = new List<MacroAction>(32);
         
-        int BEAM_WIDTH = 250; 
+        int BEAM_WIDTH = 800; 
         
-        for (int depth = 0; depth < 15; depth++)
+        for (int depth = 0; depth < 6; depth++)
         {
             if (countdown.TimeAvailable.TotalMilliseconds < 10) break;
 
@@ -520,6 +536,20 @@ public class Solver
                     score += (20 - distToW) * 100;
                 }
             }
+        }
+        
+        if (partnerWantsWindow && WindowPos.X != -1)
+        {
+            int myDistToWindow = Abs(simState.Px - WindowPos.X) + Math.Abs(simState.Py - WindowPos.Y);
+            if (myDistToWindow <= 1) 
+                score -= 15000;
+        }
+
+        if (partnerWantsOven && OvenPos.X != -1)
+        {
+            int myDistToOven = Abs(simState.Px - OvenPos.X) + Math.Abs(simState.Py - OvenPos.Y);
+            if (myDistToOven <= 1) 
+                score -= 10000;
         }
 
         return score;
